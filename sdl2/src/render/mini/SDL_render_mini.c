@@ -312,6 +312,10 @@ SDL_Renderer *Mini_CreateRenderer(SDL_Window *window, Uint32 flags)
     renderer->SetVSync = Mini_SetVSync;
     renderer->info = Mini_RenderDriver.info;
     renderer->info.flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE;
+    /* The panel, not the Mini's 640x480: a window that fills a Flip needs a
+       texture that size, and the static info cannot name a variable. */
+    renderer->info.max_texture_width = FB_W;
+    renderer->info.max_texture_height = FB_H;
     renderer->driverdata = data;
     renderer->window = window;
 

@@ -20,6 +20,10 @@
 
 #define DEF_FB_W 640
 #define DEF_FB_H 480
+/* A sanity bound on what `fbset` reports, so a garbled line cannot size the
+   framebuffer allocations. */
+#define MAX_FB_W 2048
+#define MAX_FB_H 2048
 #define FB_BPP   4
 
 #if 0
