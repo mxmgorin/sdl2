@@ -256,6 +256,34 @@ int Mini_VideoInit(_THIS)
 
     debug("%s\n", __func__);
 
+    FB_W = DEF_FB_W;
+    FB_H = DEF_FB_H;
+    fd = popen("fbset | grep \"mode \"", "r");
+    if (fd) {
+        int w = 0;
+        int h = 0;
+
+        /* `mode "752x560-60"`, the Flip's panel; the Mini's own says 640x480. */
+        if (fgets(buf, sizeof(buf), fd) && (sscanf(buf, " mode \"%dx%d", &w, &h) == 2) &&
+            (w >= DEF_FB_W) && (h >= DEF_FB_H) && (w <= MAX_FB_W) && (h <= MAX_FB_H)) {
+            FB_W = w;
+            FB_H = h;
+        }
+        pclose(fd);
+    }
+    FB_SIZE = (FB_W * FB_H * FB_BPP * 2);
+    TMP_SIZE = (FB_W * FB_H * FB_BPP);
+
+    /* The panel itself, so SDL_GetDesktopDisplayMode can answer with it. */
+    SDL_zero(mode);
+    mode.format = SDL_PIXELFORMAT_ARGB8888;
+    mode.w = FB_W;
+    mode.h = FB_H;
+    mode.refresh_rate = 60;
+    display.desktop_mode = mode;
+    display.current_mode = mode;
+    SDL_AddDisplayMode(&display, &mode);
+
     SDL_zero(mode);
     mode.format = SDL_PIXELFORMAT_RGB565;
     mode.w = 640;
@@ -325,23 +353,6 @@ int Mini_VideoInit(_THIS)
     mode.refresh_rate = 60;
     SDL_AddDisplayMode(&display, &mode);
     SDL_AddVideoDisplay(&display, SDL_FALSE);
-
-    FB_W = DEF_FB_W;
-    FB_H = DEF_FB_H;
-    FB_SIZE = (FB_W * FB_H * FB_BPP * 2);
-    TMP_SIZE = (FB_W * FB_H * FB_BPP);
-    fd = popen("fbset | grep \"mode \"", "r");
-    if (fd) {
-        fgets(buf, sizeof(buf), fd);
-        pclose(fd);
-
-        if (strstr(buf, "752")) {
-            FB_W = 752;
-            FB_H = 560;
-            FB_SIZE = (FB_W * FB_H * FB_BPP * 2);
-            TMP_SIZE = (FB_W * FB_H * FB_BPP);
-        }
-    }
 
     debug("%s, screen=%dx%d\n", __func__, FB_W, FB_H);
     GFX_Init();
