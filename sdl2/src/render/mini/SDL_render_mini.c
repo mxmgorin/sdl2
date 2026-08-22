@@ -312,6 +312,9 @@ SDL_Renderer *Mini_CreateRenderer(SDL_Window *window, Uint32 flags)
     renderer->SetVSync = Mini_SetVSync;
     renderer->info = Mini_RenderDriver.info;
     renderer->info.flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE;
+    /* From the panel at runtime: a window that fills it needs a texture that size. */
+    renderer->info.max_texture_width = FB_W;
+    renderer->info.max_texture_height = FB_H;
     renderer->driverdata = data;
     renderer->window = window;
 
