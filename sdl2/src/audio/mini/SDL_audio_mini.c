@@ -119,6 +119,80 @@ int volume_dec(void)
     return cur_volume;
 }
 
+/* Two shapes are in the wild: a JSON object with a "vol" key on this scale, which is
+   what the stock keypad daemon writes, and a bare number of raw dB. */
+static void apply_volume_file(const char *path)
+{
+    struct json_object *jfile = json_object_from_file(path);
+    struct json_object *volume = NULL;
+    FILE *fp = NULL;
+    int value = 0;
+
+    if (jfile != NULL) {
+        if (json_object_object_get_ex(jfile, JSON_VOL_KEY, &volume)) {
+            value = json_object_get_int(volume);
+            if (value != cur_volume) {
+                cur_volume = set_volume(value);
+            }
+            json_object_put(jfile);
+            return;
+        }
+        json_object_put(jfile);
+    }
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return;
+    }
+    if (fscanf(fp, "%d", &value) == 1) {
+        set_volume_raw(value - MIN_RAW_VALUE, 0);
+    }
+    fclose(fp);
+}
+
+/* The keypad daemon writes each new volume to a file and applies it itself, but its
+   MI_AO call cannot take while this process holds the device -- so the file is polled
+   and applied from in here, or the VOL keys do nothing for as long as an app runs.
+   Which file that is belongs to the firmware, not to this driver: SDL_MINI_VOLUME_FILE
+   names it, and the default is where the stock daemon puts it. */
+static void sync_volume(void)
+{
+    static const char *stock[] = { JSON_APP_FILE, JSON_CARD_FILE };
+    static int frames = 0;
+    static time_t applied = 0;
+
+    const char *env = SDL_getenv(VOLUME_FILE_ENV);
+    const char **files = stock;
+    int count = (int)SDL_arraysize(stock);
+    const char *newest = NULL;
+    time_t mtime = 0;
+    struct stat st = { 0 };
+    int cc = 0;
+
+    if (++frames < VOLUME_POLL_FRAMES) {
+        return;
+    }
+    frames = 0;
+
+    if ((env != NULL) && (env[0] != '\0')) {
+        files = &env;
+        count = 1;
+    }
+
+    for (cc = 0; cc < count; cc++) {
+        if ((stat(files[cc], &st) == 0) && (st.st_mtime >= mtime)) {
+            mtime = st.st_mtime;
+            newest = files[cc];
+        }
+    }
+
+    if ((newest == NULL) || (mtime == applied)) {
+        return;
+    }
+    applied = mtime;
+    apply_volume_file(newest);
+}
+
 static void MINI_CloseDevice(_THIS)
 {
     SDL_free(this->hidden->mixbuf);
@@ -205,6 +279,7 @@ static void MINI_PlayDevice(_THIS)
 {
     MI_AUDIO_Frame_t aoTestFrame;
 
+    sync_volume();
     aoTestFrame.eBitwidth = stGetAttr.eBitwidth;
     aoTestFrame.eSoundmode = stGetAttr.eSoundmode;
     aoTestFrame.u32Len = this->hidden->mixlen;
