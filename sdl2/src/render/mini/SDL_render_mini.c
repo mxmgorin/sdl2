@@ -77,6 +77,90 @@ static int get_pitch(void *chk)
     return -1;
 }
 
+static void *scale_buf = NULL;
+static size_t scale_len = 0;
+static int *scale_map = NULL;
+static int scale_map_len = 0;
+
+static SDL_bool nearest_wanted(void)
+{
+    static int wanted = -1;
+
+    if (wanted < 0) {
+        const char *env = SDL_getenv("SDL_MINI_NEAREST");
+
+        wanted = (env && (env[0] == '0')) ? 0 : 1;
+    }
+    return wanted ? SDL_TRUE : SDL_FALSE;
+}
+
+/* Resamples a copy nearest to its destination size, so MI_GFX, which filters every
+   resize, has nothing left to scale. */
+static const void *scale_nearest(SDL_Texture *texture, const void *pixels, const SDL_Rect *src, int dw, int dh, int *pitch)
+{
+    const int bpp = (texture->w > 0) ? (*pitch / texture->w) : 0;
+    const uint8_t *in = (const uint8_t *)pixels;
+    uint8_t *out = NULL;
+    size_t need = 0;
+    int x = 0;
+    int y = 0;
+
+    if (((bpp != 2) && (bpp != 4)) || (dw <= 0) || (dh <= 0) || (src->w <= 0) || (src->h <= 0)) {
+        return NULL;
+    }
+
+    /* GFX_Copy stages the source in a panel-sized buffer. */
+    if ((dw > FB_W) || (dh > FB_H)) {
+        return NULL;
+    }
+
+    need = (size_t)dw * dh * bpp;
+    if (need > scale_len) {
+        void *buf = SDL_realloc(scale_buf, need);
+
+        if (buf == NULL) {
+            return NULL;
+        }
+        scale_buf = buf;
+        scale_len = need;
+    }
+
+    if (dw > scale_map_len) {
+        int *map = (int *)SDL_realloc(scale_map, (size_t)dw * sizeof(int));
+
+        if (map == NULL) {
+            return NULL;
+        }
+        scale_map = map;
+        scale_map_len = dw;
+    }
+
+    /* The column each destination column reads, once per frame rather than per pixel. */
+    for (x = 0; x < dw; x++) {
+        scale_map[x] = (src->x + ((x * src->w) / dw)) * bpp;
+    }
+
+    out = (uint8_t *)scale_buf;
+    for (y = 0; y < dh; y++) {
+        const uint8_t *row = in + (size_t)(src->y + ((y * src->h) / dh)) * *pitch;
+        uint8_t *dstrow = out + ((size_t)y * dw * bpp);
+
+        if (bpp == 4) {
+            for (x = 0; x < dw; x++) {
+                ((uint32_t *)dstrow)[x] = *(const uint32_t *)(row + scale_map[x]);
+            }
+        }
+        else {
+            for (x = 0; x < dw; x++) {
+                ((uint16_t *)dstrow)[x] = *(const uint16_t *)(row + scale_map[x]);
+            }
+        }
+    }
+
+    *pitch = dw * bpp;
+    return scale_buf;
+}
+
 static void Mini_WindowEvent(SDL_Renderer *renderer, const SDL_WindowEvent *event)
 {
     debug("%s\n", __func__);
@@ -198,6 +282,18 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
     if ((pitch == 0) || (pixels == NULL)) {
         debug("%s, failed to get pitch or pixels (%d, %p)\n", __func__, pitch, pixels);
         return 0;
+    }
+
+    if (nearest_wanted() && ((dst.w != src.w) || (dst.h != src.h))) {
+        const void *scaled = scale_nearest(texture, pixels, &src, dst.w, dst.h, &pitch);
+
+        if (scaled != NULL) {
+            pixels = scaled;
+            src.x = 0;
+            src.y = 0;
+            src.w = dst.w;
+            src.h = dst.h;
+        }
     }
 
     debug("%s, texture=%p, src:%d,%d,%d,%d, dst:%d,%d,%d,%d, scale=%.2f, pitch=%d, pixels=%p\n", 
