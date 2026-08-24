@@ -11,6 +11,7 @@
 #include "SDL_hints.h"
 #include "../SDL_sysrender.h"
 #include "../../video/mini/SDL_video_mini.h"
+#include "../../video/mini/SDL_event_mini.h"
 
 typedef struct Mini_TextureData {
     void *data;
@@ -35,6 +36,15 @@ struct MY_TEXTURE {
 extern int FB_W;
 extern int FB_H;
 extern SDL_Window *vid_win;
+
+/* Where the last copy put the window on the panel, and the picture inside it, both in
+   the screen's own coordinates -- what a pointer has to be drawn against. */
+static struct {
+    int x;
+    int y;
+    int scale;
+    SDL_Rect clip;
+} panel_map = { 0, 0, 0, { 0, 0, 0, 0 } };
 
 static struct MY_TEXTURE mytex[MAX_TEXTURE] = {0};
 
@@ -281,6 +291,14 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
     dst.x += ((FB_W - (vid_win->w * scale)) / 2);
     dst.y += ((FB_H - (vid_win->h * scale)) / 2);
 
+    panel_map.x = (FB_W - (vid_win->w * scale)) / 2;
+    panel_map.y = (FB_H - (vid_win->h * scale)) / 2;
+    panel_map.scale = (int)scale;
+    panel_map.clip.x = panel_map.x + (dstrect->x * scale);
+    panel_map.clip.y = panel_map.y + (dstrect->y * scale);
+    panel_map.clip.w = dstrect->w * scale;
+    panel_map.clip.h = dstrect->h * scale;
+
     pitch = get_pitch(texture);
     if ((pitch == 0) || (pixels == NULL)) {
         debug("%s, failed to get pitch or pixels (%d, %p)\n", __func__, pitch, pixels);
@@ -326,7 +344,17 @@ static int Mini_RenderReadPixels(SDL_Renderer *renderer, const SDL_Rect *rect, U
 
 static void Mini_RenderPresent(SDL_Renderer *renderer)
 {
+    int mx = 0;
+    int my = 0;
+    int mag = Mini_PointerAt(&mx, &my);
+
     debug("%s\n", __func__);
+    /* Over the picture, and only inside it: the app redraws that much every frame, which
+       erases the arrow. */
+    if ((mag > 0) && (panel_map.scale > 0)) {
+        Mini_DrawPointer(panel_map.x + (mx * panel_map.scale),
+            panel_map.y + (my * panel_map.scale), mag * panel_map.scale, &panel_map.clip);
+    }
     GFX_Flip();
 }
 

@@ -26,6 +26,20 @@
 #define MAX_FB_H 2048
 #define FB_BPP   4
 
+/* One PNG or a folder of them, drawn around the app's picture. */
+#define BEZEL_ENV       "SDL_MINI_BEZEL"
+/* A folder deeper than this is not a bezel pack. */
+#define BEZEL_MAX       64
+
+/* The pointer arrow's size and colours; black and white are the same bytes whichever
+   way round the channels are. */
+#define POINTER_W       9
+#define POINTER_H       14
+#define POINTER_OUTLINE 0xff000000
+#define POINTER_FILL    0xffffffff
+/* A cache flush starts on a page boundary. */
+#define FB_FLUSH_ALIGN  4096
+
 #if 0
     #define debug(...) printf(__VA_ARGS__)
 #else
@@ -55,6 +69,11 @@ typedef struct _GFX {
 void GFX_Clear(void);
 void GFX_Flip(void);
 int GFX_Copy(const void *pixels, SDL_Rect srcrect, SDL_Rect dstrect, int pitch, int alpha, int rotate);
+
+/* Walks the bezel folder; 0 when there is nothing to walk, so the key it came from can
+   still reach the app. */
+int Mini_BezelStep(int step);
+void Mini_DrawPointer(int px, int py, int mag, const SDL_Rect *clip);
 
 #endif
 
