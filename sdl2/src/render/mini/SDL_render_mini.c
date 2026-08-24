@@ -271,10 +271,13 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
     int c1 = FB_H / vid_win->h;
     float scale = c0 > c1 ? c1 : c0;
 
+    /* The panel is mounted upside down: the blit rotates the pixels and the rect has
+       to be mirrored on both axes to land where the app asked. Only x was, which no
+       port here could see -- every one of them presents the window's full height. */
     dst.w = dstrect->w * scale;
     dst.h = dstrect->h * scale;
     dst.x = (vid_win->w - (dstrect->x + dstrect->w)) * scale;
-    dst.y = dstrect->y * scale;
+    dst.y = (vid_win->h - (dstrect->y + dstrect->h)) * scale;
     dst.x += ((FB_W - (vid_win->w * scale)) / 2);
     dst.y += ((FB_H - (vid_win->h * scale)) / 2);
 
