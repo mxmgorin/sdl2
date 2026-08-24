@@ -12,6 +12,15 @@
 /* Top speed in panel pixels a second, and the rect the pointer may not leave. */
 #define MOUSE_SPEED_ENV     "SDL_MINI_MOUSE_SPEED"
 #define MOUSE_RECT_ENV      "SDL_MINI_MOUSE_RECT"
+/* How much bigger than its nine pixels the arrow is drawn; `0` draws none. */
+#define MOUSE_ICON_ENV      "SDL_MINI_MOUSE_ICON"
+#define MOUSE_ICON_MAG      2
+#define MOUSE_ICON_TOP      8
+
+/* SELECT + L1/R1 walks a bezel folder. */
+#define BEZEL_KEY_HOLD      KEY_RIGHTCTRL
+#define BEZEL_KEY_PREV      KEY_E
+#define BEZEL_KEY_NEXT      KEY_T
 
 /* L2 is the shoulder Miyoo firmwares leave free; A and B sit where a mouse's buttons
    would. */
@@ -34,6 +43,9 @@
 void Mini_EventInit(void);
 void Mini_EventQuit(void);
 void Mini_PumpEvents(_THIS);
+/* Where the pointer is in window coordinates, and how much to magnify the arrow that
+   marks it; 0 when there is none to draw. */
+int Mini_PointerAt(int *x, int *y);
 
 #endif
 

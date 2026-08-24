@@ -37,6 +37,26 @@
 #include "SDL_gles_mini.h"
 #include "SDL_fb_mini.h"
 
+/* A bezel is the only PNG here, so the decoder is vendored: SDL2_image would add libpng
+   and libz to a shared library. */
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+/* Nothing here reads its failure string, and the string is what pulls thread-local
+   storage into a library that is LD_PRELOADed. */
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_NO_THREAD_LOCALS
+#define STBI_MALLOC     SDL_malloc
+#define STBI_REALLOC    SDL_realloc
+#define STBI_FREE       SDL_free
+#define STBI_ASSERT(x)  SDL_assert(x)
+#define STB_IMAGE_IMPLEMENTATION
+/* Upstream's own warnings, in a file that is not ours to fix. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#include "stb_image.h"
+#pragma GCC diagnostic pop
+
 GFX gfx = { 0 };
 
 int FB_W = 0;
@@ -170,6 +190,233 @@ void* GFX_CB(void)
     GFX_Copy(gfx.tmp.virAddr, srt, drt, srt.w * FB_BPP, 0, E_MI_GFX_ROTATE_180);
     GFX_Flip();
     return gfx.tmp.virAddr;
+}
+
+static uint32_t *bezel_pix = NULL;
+static int bezel_w = 0;
+static int bezel_h = 0;
+static char *bezel_file[BEZEL_MAX] = { NULL };
+static int bezel_count = 0;
+static int bezel_now = 0;
+
+static void bezel_free(void)
+{
+    stbi_image_free(bezel_pix);
+    bezel_pix = NULL;
+    bezel_w = 0;
+    bezel_h = 0;
+}
+
+/* One bezel is held decoded, not the whole folder: each is the panel's size in
+   ARGB8888 and these devices have 128 MB. */
+static int bezel_load(const char *path)
+{
+    void *file = NULL;
+    size_t len = 0;
+    stbi_uc *rgba = NULL;
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+    int c0 = 0;
+
+    /* Logged rather than debugged: a missing bezel looks the same however it failed. */
+    bezel_free();
+    file = SDL_LoadFile(path, &len);
+    if (file == NULL) {
+        SDL_Log("Mini: bezel %s cannot be read", path);
+        return -1;
+    }
+
+    rgba = stbi_load_from_memory(file, (int)len, &w, &h, &comp, 4);
+    SDL_free(file);
+    if (rgba == NULL) {
+        SDL_Log("Mini: bezel %s is not a PNG this can decode", path);
+        return -1;
+    }
+    if ((w > FB_W) || (h > FB_H)) {
+        SDL_Log("Mini: bezel %s is %dx%d, bigger than the panel's %dx%d", path, w, h,
+            FB_W, FB_H);
+        stbi_image_free(rgba);
+        return -1;
+    }
+    if ((w < FB_W) || (h < FB_H)) {
+        SDL_Log("Mini: bezel %s is %dx%d on a %dx%d panel, centred with black around it",
+            path, w, h, FB_W, FB_H);
+    }
+
+    /* stb hands back R,G,B,A; what the blitter calls ARGB8888 is B,G,R,A in memory. */
+    for (c0 = 0; c0 < (w * h * 4); c0 += 4) {
+        stbi_uc r = rgba[c0];
+
+        rgba[c0] = rgba[c0 + 2];
+        rgba[c0 + 2] = r;
+    }
+
+    bezel_pix = (uint32_t *)rgba;
+    bezel_w = w;
+    bezel_h = h;
+    return 0;
+}
+
+/* Into both framebuffer halves, as only the app's rect is ever redrawn. Centred at its
+   own size: MI_GFX filters a resize. */
+static void bezel_draw(void)
+{
+    SDL_Rect srt = { 0, 0, bezel_w, bezel_h };
+    SDL_Rect drt = { (FB_W - bezel_w) / 2, (FB_H - bezel_h) / 2, bezel_w, bezel_h };
+    int c0 = 0;
+
+    if (bezel_pix == NULL) {
+        return;
+    }
+    for (c0 = 0; c0 < 2; c0++) {
+        GFX_Copy(bezel_pix, srt, drt, bezel_w * FB_BPP, 0, E_MI_GFX_ROTATE_180);
+        /* The other buffer; twice puts the offset back where GFX_Flip expects it. */
+        gfx.vinfo.yoffset ^= FB_H;
+    }
+}
+
+static int bezel_name(const char *name)
+{
+    const char *dot = SDL_strrchr(name, '.');
+
+    return (dot != NULL) && !SDL_strcasecmp(dot, ".png");
+}
+
+static int bezel_sort(const void *a, const void *b)
+{
+    return SDL_strcmp(*(const char **)a, *(const char **)b);
+}
+
+/* Reads SDL_MINI_BEZEL, one PNG or a folder of them, in name order. */
+static void bezel_init(void)
+{
+    const char *env = SDL_getenv(BEZEL_ENV);
+    char path[MAX_PATH * 4] = { 0 };
+    struct dirent *ent = NULL;
+    DIR *dir = NULL;
+
+    if ((env == NULL) || (env[0] == '\0')) {
+        return;
+    }
+
+    dir = opendir(env);
+    if (dir == NULL) {
+        bezel_file[bezel_count++] = SDL_strdup(env);
+    } else {
+        while (((ent = readdir(dir)) != NULL) && (bezel_count < BEZEL_MAX)) {
+            if (!bezel_name(ent->d_name)) {
+                continue;
+            }
+            SDL_snprintf(path, sizeof(path), "%s/%s", env, ent->d_name);
+            bezel_file[bezel_count++] = SDL_strdup(path);
+        }
+        closedir(dir);
+        SDL_qsort(bezel_file, bezel_count, sizeof(bezel_file[0]), bezel_sort);
+    }
+
+    SDL_Log("Mini: %d bezel(s) at %s", bezel_count, env);
+    if ((bezel_count > 0) && (bezel_load(bezel_file[0]) == 0)) {
+        bezel_draw();
+        SDL_Log("Mini: bezel %s drawn", bezel_file[0]);
+    }
+}
+
+static void bezel_quit(void)
+{
+    int c0 = 0;
+
+    for (c0 = 0; c0 < bezel_count; c0++) {
+        SDL_free(bezel_file[c0]);
+        bezel_file[c0] = NULL;
+    }
+    bezel_count = 0;
+    bezel_now = 0;
+    bezel_free();
+}
+
+int Mini_BezelStep(int step)
+{
+    if (bezel_count < 2) {
+        return 0;
+    }
+    bezel_now = (bezel_now + step + bezel_count) % bezel_count;
+    if (bezel_load(bezel_file[bezel_now]) == 0) {
+        bezel_draw();
+        SDL_Log("Mini: bezel %d of %d, %s", bezel_now + 1, bezel_count,
+            bezel_file[bezel_now]);
+    }
+    return 1;
+}
+
+/* An arrow with its tip at the top left: `X` is the outline, `.` the fill, a space is
+   not drawn at all -- the blitter here does no alpha. */
+static const char *pointer_art[POINTER_H] = {
+    "X        ",
+    "XX       ",
+    "X.X      ",
+    "X..X     ",
+    "X...X    ",
+    "X....X   ",
+    "X.....X  ",
+    "X......X ",
+    "X.......X",
+    "X....XXXX",
+    "X..X.X   ",
+    "X.X X.X  ",
+    "XX   X.X ",
+    "X     XX "
+};
+
+/* Draws the arrow straight into the framebuffer, never erased: only inside `clip`,
+   which the app rewrites every frame. */
+void Mini_DrawPointer(int px, int py, int mag, const SDL_Rect *clip)
+{
+    uint32_t *fb = (uint32_t *)gfx.fb.virAddr;
+    int top = FB_H;
+    int bottom = -1;
+    int ax = 0;
+    int ay = 0;
+
+    if ((fb == NULL) || (mag < 1)) {
+        return;
+    }
+    fb += FB_W * gfx.vinfo.yoffset;
+
+    for (ay = 0; ay < (POINTER_H * mag); ay++) {
+        for (ax = 0; ax < (POINTER_W * mag); ax++) {
+            char ink = pointer_art[ay / mag][ax / mag];
+            int sx = px + ax;
+            int sy = py + ay;
+            int fx = FB_W - 1 - sx;
+            int fy = FB_H - 1 - sy;
+
+            if ((ink == ' ') ||
+                (sx < clip->x) || (sx >= (clip->x + clip->w)) ||
+                (sy < clip->y) || (sy >= (clip->y + clip->h)) ||
+                (fx < 0) || (fx >= FB_W) || (fy < 0) || (fy >= FB_H)) {
+                continue;
+            }
+            /* The panel is mounted upside down, so every pixel goes to the opposite
+               corner of the framebuffer. */
+            fb[(fy * FB_W) + fx] = (ink == 'X') ? POINTER_OUTLINE : POINTER_FILL;
+            if (fy < top) {
+                top = fy;
+            }
+            if (fy > bottom) {
+                bottom = fy;
+            }
+        }
+    }
+
+    if (bottom >= top) {
+        /* The mapping is cached, so written rows are flushed before the panel reads
+           them, from a page boundary. */
+        uintptr_t from = (uintptr_t)&fb[top * FB_W] & ~(uintptr_t)(FB_FLUSH_ALIGN - 1);
+        uintptr_t to = (uintptr_t)&fb[(bottom + 1) * FB_W];
+
+        MI_SYS_FlushInvCache((void *)from, to - from);
+    }
 }
 
 static void Mini_DeleteDevice(SDL_VideoDevice *device)
@@ -356,6 +603,7 @@ int Mini_VideoInit(_THIS)
 
     debug("%s, screen=%dx%d\n", __func__, FB_W, FB_H);
     GFX_Init();
+    bezel_init();
     Mini_EventInit();
     return 0;
 }
@@ -370,6 +618,7 @@ void Mini_VideoQuit(_THIS)
 {
     debug("%s\n", __func__);
     Mini_EventQuit();
+    bezel_quit();
 }
 
 #endif

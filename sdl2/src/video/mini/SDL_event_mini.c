@@ -39,6 +39,7 @@ typedef enum {
 
 static MouseMode mouse_mode = MOUSE_OFF;
 static int mouse_speed = MOUSE_SPEED_MAX;
+static int mouse_icon = MOUSE_ICON_MAG;
 static SDL_Rect mouse_rect = { 0, 0, 0, 0 };
 static int mouse_placed = 0;
 /* The toggle's own latch, and what the previous pump resolved it to. */
@@ -76,8 +77,19 @@ static void mouse_init(void)
         (SDL_sscanf(env, "%d,%d,%d,%d", &rect.x, &rect.y, &rect.w, &rect.h) == 4)) {
         mouse_rect = rect;
     }
-    debug("%s, mouse mode=%d, speed=%d, rect=%d,%d,%d,%d\n", __func__, mouse_mode,
-        mouse_speed, mouse_rect.x, mouse_rect.y, mouse_rect.w, mouse_rect.h);
+
+    env = SDL_getenv(MOUSE_ICON_ENV);
+    if (env != NULL) {
+        int mag = SDL_atoi(env);
+
+        if ((mag >= 0) && (mag <= MOUSE_ICON_TOP)) {
+            mouse_icon = mag;
+        }
+    }
+    /* Logged rather than debugged, as only a device shows what the pad does. */
+    SDL_Log("Mini: pointer on L2 (%s), %d px/s, arrow x%d, inside %d,%d,%d,%d",
+        (mouse_mode == MOUSE_HOLD) ? "hold" : "toggle", mouse_speed, mouse_icon,
+        mouse_rect.x, mouse_rect.y, mouse_rect.w, mouse_rect.h);
 }
 
 /* The keys the pointer takes while it is live; the mode key stays the mode's own. */
@@ -237,6 +249,31 @@ static int mouse_pump(void)
     return live;
 }
 
+int Mini_PointerAt(int *x, int *y)
+{
+    if (!mouse_prev || (mouse_icon < 1)) {
+        return 0;
+    }
+    *x = (int)mouse_x;
+    *y = (int)mouse_y;
+    return mouse_icon;
+}
+
+/* SELECT + L1/R1 walks the bezels. The key is only swallowed if there was something to
+   walk, so a port with one bezel or none keeps both shoulders. */
+static void bezel_hotkey(void)
+{
+    if (!myheld[BEZEL_KEY_HOLD]) {
+        return;
+    }
+    if (mykey[BEZEL_KEY_PREV][1] && Mini_BezelStep(-1)) {
+        mykey[BEZEL_KEY_PREV][1] = 0;
+    }
+    if (mykey[BEZEL_KEY_NEXT][1] && Mini_BezelStep(1)) {
+        mykey[BEZEL_KEY_NEXT][1] = 0;
+    }
+}
+
 int Mini_InputHandler(void *data)
 {
     int fd = -1;
@@ -368,6 +405,7 @@ void Mini_PumpEvents(_THIS)
     int c0 = 0;
     int mouse = mouse_pump();
 
+    bezel_hotkey();
     for (c0 = 0; c0 < KEY_MAX; c0++) {
         if ((mouse_mode != MOUSE_OFF) &&
             ((c0 == MOUSE_MODE_KEY) || (mouse && mouse_pad_key(c0)))) {
