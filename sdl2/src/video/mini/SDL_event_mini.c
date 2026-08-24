@@ -17,6 +17,7 @@
 #include "../../core/linux/SDL_evdev.h"
 #include "../../thread/SDL_systhread.h"
 
+#include "SDL_timer.h"
 #include "SDL_video_mini.h"
 #include "SDL_event_mini.h"
 
@@ -24,7 +25,217 @@ static int running = 0;
 static SDL_Thread *thread = NULL;
 
 uint8_t mykey[KEY_MAX][2] = { 0 };
+/* The flags above are edges the pump clears; a pointer needs to know what is down. */
+static uint8_t myheld[KEY_MAX] = { 0 };
 static SDL_Scancode mymap[KEY_MAX] = { 0 };
+
+extern SDL_Window *vid_win;
+
+typedef enum {
+    MOUSE_OFF = 0,
+    MOUSE_TOGGLE,
+    MOUSE_HOLD
+} MouseMode;
+
+static MouseMode mouse_mode = MOUSE_OFF;
+static int mouse_speed = MOUSE_SPEED_MAX;
+static SDL_Rect mouse_rect = { 0, 0, 0, 0 };
+static int mouse_placed = 0;
+/* The toggle's own latch, and what the previous pump resolved it to. */
+static int mouse_live = 0;
+static int mouse_prev = 0;
+static float mouse_x = 0.0f;
+static float mouse_y = 0.0f;
+static Uint32 mouse_ms = 0;
+static Uint32 mouse_push_ms = 0;
+static uint8_t mouse_btn[2] = { 0 };
+
+static void mouse_init(void)
+{
+    const char *env = SDL_getenv(MOUSE_MODE_ENV);
+    SDL_Rect rect = { 0, 0, 0, 0 };
+    int speed = 0;
+
+    if ((env == NULL) || (env[0] == '\0') ||
+        !SDL_strcasecmp(env, "0") || !SDL_strcasecmp(env, "off")) {
+        return;
+    }
+    mouse_mode = !SDL_strcasecmp(env, "hold") ? MOUSE_HOLD : MOUSE_TOGGLE;
+
+    env = SDL_getenv(MOUSE_SPEED_ENV);
+    if (env != NULL) {
+        speed = SDL_atoi(env);
+        if ((speed >= MOUSE_SPEED_MIN) && (speed <= MOUSE_SPEED_TOP)) {
+            mouse_speed = speed;
+        }
+    }
+
+    /* Outside the app's picture there is nowhere to put the pointer. */
+    env = SDL_getenv(MOUSE_RECT_ENV);
+    if ((env != NULL) &&
+        (SDL_sscanf(env, "%d,%d,%d,%d", &rect.x, &rect.y, &rect.w, &rect.h) == 4)) {
+        mouse_rect = rect;
+    }
+    debug("%s, mouse mode=%d, speed=%d, rect=%d,%d,%d,%d\n", __func__, mouse_mode,
+        mouse_speed, mouse_rect.x, mouse_rect.y, mouse_rect.w, mouse_rect.h);
+}
+
+/* The keys the pointer takes while it is live; the mode key stays the mode's own. */
+static int mouse_pad_key(int code)
+{
+    switch (code) {
+    case KEY_UP:
+    case KEY_DOWN:
+    case KEY_LEFT:
+    case KEY_RIGHT:
+    case MOUSE_LEFT_KEY:
+    case MOUSE_RIGHT_KEY:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* What the app was told about the pad has to be untold across a mode change, or a
+   direction held as the pointer takes the keys stays down for good. */
+static void mouse_switch(int live)
+{
+    int c0 = 0;
+
+    for (c0 = 0; c0 < KEY_MAX; c0++) {
+        if (myheld[c0] && mymap[c0] && mouse_pad_key(c0)) {
+            SDL_SendKeyboardKey(live ? SDL_RELEASED : SDL_PRESSED,
+                SDL_GetScancodeFromKey(mymap[c0]));
+        }
+    }
+}
+
+/* The window bounds the pointer, narrowed to whatever rect a port named. It starts in
+   the middle of that once; a later mode switch leaves it where it was. */
+static void mouse_place(void)
+{
+    SDL_Rect win = { 0, 0, vid_win->w, vid_win->h };
+    SDL_Rect fit = { 0, 0, 0, 0 };
+
+    if (!SDL_IntersectRect(&mouse_rect, &win, &fit)) {
+        fit = win;
+    }
+    mouse_rect = fit;
+
+    if (!mouse_placed) {
+        mouse_placed = 1;
+        mouse_x = mouse_rect.x + (mouse_rect.w / 2.0f);
+        mouse_y = mouse_rect.y + (mouse_rect.h / 2.0f);
+    }
+    mouse_ms = SDL_GetTicks();
+    mouse_push_ms = 0;
+    SDL_SendMouseMotion(vid_win, 0, 0, (int)mouse_x, (int)mouse_y);
+}
+
+/* A tap that began and ended between two pumps is still a click: the press edge
+   stands in for the held state it no longer has. */
+static void mouse_buttons(int live)
+{
+    static const struct {
+        int key;
+        Uint8 button;
+    } btn[] = {
+        { MOUSE_LEFT_KEY, SDL_BUTTON_LEFT },
+        { MOUSE_RIGHT_KEY, SDL_BUTTON_RIGHT }
+    };
+    int c0 = 0;
+    uint8_t down = 0;
+
+    for (c0 = 0; c0 < (int)SDL_arraysize(btn); c0++) {
+        down = live && (myheld[btn[c0].key] || mykey[btn[c0].key][1]);
+        if (down != mouse_btn[c0]) {
+            mouse_btn[c0] = down;
+            SDL_SendMouseButton(vid_win, 0, down ? SDL_PRESSED : SDL_RELEASED,
+                btn[c0].button);
+        }
+    }
+}
+
+/* Moved by elapsed time, not per pump, so its speed does not depend on how often the
+   app asks for events. */
+static void mouse_motion(void)
+{
+    Uint32 now = SDL_GetTicks();
+    Uint32 step_ms = now - mouse_ms;
+    Uint32 ramp_ms = 0;
+    int dx = myheld[KEY_RIGHT] - myheld[KEY_LEFT];
+    int dy = myheld[KEY_DOWN] - myheld[KEY_UP];
+    float step = 0.0f;
+
+    mouse_ms = now;
+    if ((dx == 0) && (dy == 0)) {
+        mouse_push_ms = 0;
+        return;
+    }
+    if (mouse_push_ms == 0) {
+        mouse_push_ms = now;
+    }
+    if (step_ms > MOUSE_STEP_MAX_MS) {
+        step_ms = MOUSE_STEP_MAX_MS;
+    }
+
+    ramp_ms = now - mouse_push_ms;
+    if (ramp_ms > MOUSE_RAMP_MS) {
+        ramp_ms = MOUSE_RAMP_MS;
+    }
+    step = MOUSE_SPEED_MIN +
+        ((mouse_speed - MOUSE_SPEED_MIN) * ((float)ramp_ms / MOUSE_RAMP_MS));
+    step = (step * step_ms) / 1000.0f;
+    if ((dx != 0) && (dy != 0)) {
+        step *= MOUSE_DIAGONAL;
+    }
+
+    mouse_x += dx * step;
+    mouse_y += dy * step;
+    if (mouse_x < mouse_rect.x) {
+        mouse_x = mouse_rect.x;
+    }
+    if (mouse_y < mouse_rect.y) {
+        mouse_y = mouse_rect.y;
+    }
+    if (mouse_x > (mouse_rect.x + mouse_rect.w - 1)) {
+        mouse_x = mouse_rect.x + mouse_rect.w - 1;
+    }
+    if (mouse_y > (mouse_rect.y + mouse_rect.h - 1)) {
+        mouse_y = mouse_rect.y + mouse_rect.h - 1;
+    }
+    SDL_SendMouseMotion(vid_win, 0, 0, (int)mouse_x, (int)mouse_y);
+}
+
+/* Whether the pointer holds the pad this pump. */
+static int mouse_pump(void)
+{
+    int live = 0;
+
+    if ((mouse_mode == MOUSE_OFF) || (vid_win == NULL)) {
+        return 0;
+    }
+
+    if (mouse_mode == MOUSE_HOLD) {
+        mouse_live = myheld[MOUSE_MODE_KEY];
+    } else if (mykey[MOUSE_MODE_KEY][1]) {
+        mouse_live = !mouse_live;
+    }
+
+    live = mouse_live;
+    if (live != mouse_prev) {
+        mouse_prev = live;
+        mouse_switch(live);
+        if (live) {
+            mouse_place();
+        }
+    }
+    mouse_buttons(live);
+    if (live) {
+        mouse_motion();
+    }
+    return live;
+}
 
 int Mini_InputHandler(void *data)
 {
@@ -46,6 +257,7 @@ int Mini_InputHandler(void *data)
                on the next code's release flag. */
             if ((ev.type == EV_KEY) && (ev.code < KEY_MAX) && (ev.value < 2)) {
                 mykey[ev.code][ev.value] = 1;
+                myheld[ev.code] = (ev.value != 0);
                 debug("%s, code:%d, value:%d\n", __func__, ev.code, ev.value);
             }
         }
@@ -137,6 +349,8 @@ void Mini_EventInit(void)
     mymap[KEY_RIGHTALT] = SDLK_RALT;
     mymap[KEY_LEFTALT] = SDLK_LALT;
 
+    mouse_init();
+
     if ((thread = SDL_CreateThreadInternal(Mini_InputHandler, "Mini_InputHandler", 4096, NULL)) == NULL) {
         debug("%s, failed to create input thread\n", __func__);
     }
@@ -152,8 +366,15 @@ void Mini_EventQuit(void)
 void Mini_PumpEvents(_THIS)
 {
     int c0 = 0;
+    int mouse = mouse_pump();
 
     for (c0 = 0; c0 < KEY_MAX; c0++) {
+        if ((mouse_mode != MOUSE_OFF) &&
+            ((c0 == MOUSE_MODE_KEY) || (mouse && mouse_pad_key(c0)))) {
+            mykey[c0][0] = 0;
+            mykey[c0][1] = 0;
+            continue;
+        }
         if (mykey[c0][1] && mymap[c0]) {
             mykey[c0][1] = 0;
             debug("%s, key pressed: %d\n", __func__, mymap[c0]);
