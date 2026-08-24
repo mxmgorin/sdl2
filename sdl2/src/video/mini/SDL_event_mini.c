@@ -42,7 +42,9 @@ int Mini_InputHandler(void *data)
     fcntl(fd, F_SETFL, O_NONBLOCK);
     while (running) {
         if (read(fd, &ev, sizeof(struct input_event)) > 0) {
-            if (ev.type == EV_KEY) {
+            /* Value 2 is autorepeat and the pair has no third slot: writing it lands
+               on the next code's release flag. */
+            if ((ev.type == EV_KEY) && (ev.code < KEY_MAX) && (ev.value < 2)) {
                 mykey[ev.code][ev.value] = 1;
                 debug("%s, code:%d, value:%d\n", __func__, ev.code, ev.value);
             }
