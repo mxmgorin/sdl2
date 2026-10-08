@@ -288,6 +288,59 @@ static int bezel_sort(const void *a, const void *b)
     return SDL_strcmp(*(const char **)a, *(const char **)b);
 }
 
+static const char *bezel_base(const char *path)
+{
+    const char *slash = SDL_strrchr(path, '/');
+
+    return (slash != NULL) ? (slash + 1) : path;
+}
+
+/* The index of the bezel named in SDL_MINI_BEZEL_SAVE, matched by name, or the first
+   when there is none. */
+static int bezel_saved(void)
+{
+    const char *save = SDL_getenv(BEZEL_SAVE_ENV);
+    char name[MAX_PATH] = { 0 };
+    size_t len = 0;
+    FILE *fp = NULL;
+    int c0 = 0;
+
+    if ((save == NULL) || ((fp = fopen(save, "r")) == NULL)) {
+        return 0;
+    }
+    if (fgets(name, sizeof(name), fp) == NULL) {
+        name[0] = '\0';
+    }
+    fclose(fp);
+    len = SDL_strlen(name);
+    while ((len > 0) && ((name[len - 1] == '\n') || (name[len - 1] == '\r'))) {
+        name[--len] = '\0';
+    }
+    for (c0 = 0; c0 < bezel_count; c0++) {
+        if (!SDL_strcmp(bezel_base(bezel_file[c0]), name)) {
+            return c0;
+        }
+    }
+    return 0;
+}
+
+static void bezel_save(void)
+{
+    const char *save = SDL_getenv(BEZEL_SAVE_ENV);
+    FILE *fp = NULL;
+
+    if ((save == NULL) || (save[0] == '\0')) {
+        return;
+    }
+    fp = fopen(save, "w");
+    if (fp == NULL) {
+        SDL_Log("Mini: bezel choice cannot be saved to %s", save);
+        return;
+    }
+    fprintf(fp, "%s\n", bezel_base(bezel_file[bezel_now]));
+    fclose(fp);
+}
+
 /* Reads SDL_MINI_BEZEL, one PNG or a folder of them, in name order. */
 static void bezel_init(void)
 {
@@ -316,9 +369,10 @@ static void bezel_init(void)
     }
 
     SDL_Log("Mini: %d bezel(s) at %s", bezel_count, env);
-    if ((bezel_count > 0) && (bezel_load(bezel_file[0]) == 0)) {
+    bezel_now = bezel_saved();
+    if ((bezel_count > 0) && (bezel_load(bezel_file[bezel_now]) == 0)) {
         bezel_draw();
-        SDL_Log("Mini: bezel %s drawn", bezel_file[0]);
+        SDL_Log("Mini: bezel %s drawn", bezel_file[bezel_now]);
     }
 }
 
@@ -343,6 +397,7 @@ int Mini_BezelStep(int step)
     bezel_now = (bezel_now + step + bezel_count) % bezel_count;
     if (bezel_load(bezel_file[bezel_now]) == 0) {
         bezel_draw();
+        bezel_save();
         SDL_Log("Mini: bezel %d of %d, %s", bezel_now + 1, bezel_count,
             bezel_file[bezel_now]);
     }

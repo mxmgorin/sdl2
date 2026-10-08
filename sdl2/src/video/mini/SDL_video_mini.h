@@ -28,6 +28,8 @@
 
 /* One PNG or a folder of them, drawn around the app's picture. */
 #define BEZEL_ENV       "SDL_MINI_BEZEL"
+/* A file holding the chosen bezel's name, so the choice outlives the run. */
+#define BEZEL_SAVE_ENV  "SDL_MINI_BEZEL_SAVE"
 /* A folder deeper than this is not a bezel pack. */
 #define BEZEL_MAX       64
 
