@@ -37,14 +37,15 @@ extern int FB_W;
 extern int FB_H;
 extern SDL_Window *vid_win;
 
-/* Where the last copy put the window on the panel, and the picture inside it, both in
-   the screen's own coordinates -- what a pointer has to be drawn against. */
+/* Where the last copy put the window, the rect the app asked for and the picture, in
+   panel coordinates; the pointer is drawn against them. */
 static struct {
     int x;
     int y;
     int scale;
+    SDL_Rect want;
     SDL_Rect clip;
-} panel_map = { 0, 0, 0, { 0, 0, 0, 0 } };
+} panel_map = { 0, 0, 0, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } };
 
 static struct MY_TEXTURE mytex[MAX_TEXTURE] = {0};
 
@@ -171,6 +172,34 @@ static const void *scale_nearest(SDL_Texture *texture, const void *pixels, const
     return scale_buf;
 }
 
+/* Where a copy of `src` asked for at `want` lands in the scaling mode, within `area`,
+   the window on the panel. */
+static SDL_Rect scaled_rect(const SDL_Rect *want, const SDL_Rect *src, const SDL_Rect *area)
+{
+    SDL_Rect out = *want;
+    int k = 0;
+
+    switch (Mini_ScaleMode()) {
+    case SCALE_FIT:
+        break;
+    case SCALE_INTEGER:
+        if ((src->w > 0) && (src->h > 0)) {
+            k = SDL_min(area->w / src->w, area->h / src->h);
+        }
+        if (k > 0) {
+            out.w = src->w * k;
+            out.h = src->h * k;
+            out.x = area->x + ((area->w - out.w) / 2);
+            out.y = area->y + ((area->h - out.h) / 2);
+        }
+        break;
+    case SCALE_STRETCH:
+        out = *area;
+        break;
+    }
+    return out;
+}
+
 static void Mini_WindowEvent(SDL_Renderer *renderer, const SDL_WindowEvent *event)
 {
     debug("%s\n", __func__);
@@ -276,28 +305,31 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
     const void *pixels = get_pixels(texture);
     SDL_Rect dst = { 0 };
     SDL_Rect src = {srcrect->x, srcrect->y, srcrect->w, srcrect->h};
+    SDL_Rect area = { 0 };
 
     int c0 = FB_W / vid_win->w;
     int c1 = FB_H / vid_win->h;
     float scale = c0 > c1 ? c1 : c0;
 
-    /* The panel is mounted upside down: the blit rotates the pixels and the rect has
-       to be mirrored on both axes to land where the app asked. Only x was, which no
-       port here could see -- every one of them presents the window's full height. */
-    dst.w = dstrect->w * scale;
-    dst.h = dstrect->h * scale;
-    dst.x = (vid_win->w - (dstrect->x + dstrect->w)) * scale;
-    dst.y = (vid_win->h - (dstrect->y + dstrect->h)) * scale;
-    dst.x += ((FB_W - (vid_win->w * scale)) / 2);
-    dst.y += ((FB_H - (vid_win->h * scale)) / 2);
-
     panel_map.x = (FB_W - (vid_win->w * scale)) / 2;
     panel_map.y = (FB_H - (vid_win->h * scale)) / 2;
     panel_map.scale = (int)scale;
-    panel_map.clip.x = panel_map.x + (dstrect->x * scale);
-    panel_map.clip.y = panel_map.y + (dstrect->y * scale);
-    panel_map.clip.w = dstrect->w * scale;
-    panel_map.clip.h = dstrect->h * scale;
+    panel_map.want.x = panel_map.x + (dstrect->x * scale);
+    panel_map.want.y = panel_map.y + (dstrect->y * scale);
+    panel_map.want.w = dstrect->w * scale;
+    panel_map.want.h = dstrect->h * scale;
+    area.x = panel_map.x;
+    area.y = panel_map.y;
+    area.w = vid_win->w * scale;
+    area.h = vid_win->h * scale;
+    panel_map.clip = scaled_rect(&panel_map.want, &src, &area);
+
+    /* The panel is mounted upside down: the blit rotates, so the rect is mirrored on
+       both axes. */
+    dst.w = panel_map.clip.w;
+    dst.h = panel_map.clip.h;
+    dst.x = FB_W - (panel_map.clip.x + panel_map.clip.w);
+    dst.y = FB_H - (panel_map.clip.y + panel_map.clip.h);
 
     pitch = get_pitch(texture);
     if ((pitch == 0) || (pixels == NULL)) {
@@ -349,11 +381,15 @@ static void Mini_RenderPresent(SDL_Renderer *renderer)
     int mag = Mini_PointerAt(&mx, &my);
 
     debug("%s\n", __func__);
-    /* Over the picture, and only inside it: the app redraws that much every frame, which
-       erases the arrow. */
-    if ((mag > 0) && (panel_map.scale > 0)) {
-        Mini_DrawPointer(panel_map.x + (mx * panel_map.scale),
-            panel_map.y + (my * panel_map.scale), mag * panel_map.scale, &panel_map.clip);
+    /* Over the picture, at the spot matching the app's pointer, and only inside it: the
+       app redraws that much every frame, which erases the arrow. */
+    if ((mag > 0) && (panel_map.scale > 0) && (panel_map.want.w > 0) && (panel_map.want.h > 0)) {
+        int px = panel_map.x + (mx * panel_map.scale) - panel_map.want.x;
+        int py = panel_map.y + (my * panel_map.scale) - panel_map.want.y;
+
+        Mini_DrawPointer(panel_map.clip.x + ((px * panel_map.clip.w) / panel_map.want.w),
+            panel_map.clip.y + ((py * panel_map.clip.h) / panel_map.want.h),
+            mag * panel_map.scale, &panel_map.clip);
     }
     GFX_Flip();
 }

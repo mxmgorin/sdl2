@@ -259,12 +259,15 @@ int Mini_PointerAt(int *x, int *y)
     return mouse_icon;
 }
 
-/* SELECT + LEFT/RIGHT walks the bezels. The key is only swallowed if there was something
-   to walk, so a port with one bezel or none keeps both directions. */
-static void bezel_hotkey(void)
+/* SELECT + LEFT/RIGHT walks the bezels and SELECT + R1 steps the scaling mode. A key is
+   only swallowed if it did something, so a port without bezels or modes keeps it. */
+static void select_hotkeys(void)
 {
     if (!myheld[BEZEL_KEY_HOLD]) {
         return;
+    }
+    if (mykey[SCALE_KEY][1] && Mini_ScaleStep()) {
+        mykey[SCALE_KEY][1] = 0;
     }
     if (mykey[BEZEL_KEY_PREV][1] && Mini_BezelStep(-1)) {
         mykey[BEZEL_KEY_PREV][1] = 0;
@@ -405,7 +408,7 @@ void Mini_PumpEvents(_THIS)
     int c0 = 0;
     int mouse = mouse_pump();
 
-    bezel_hotkey();
+    select_hotkeys();
     for (c0 = 0; c0 < KEY_MAX; c0++) {
         if ((mouse_mode != MOUSE_OFF) &&
             ((c0 == MOUSE_MODE_KEY) || (mouse && mouse_pad_key(c0)))) {

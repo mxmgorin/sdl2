@@ -22,6 +22,9 @@
 #define BEZEL_KEY_PREV      KEY_LEFT
 #define BEZEL_KEY_NEXT      KEY_RIGHT
 
+/* SELECT + R1 steps the scaling mode. */
+#define SCALE_KEY           KEY_T
+
 /* L2 is the shoulder Miyoo firmwares leave free; A and B sit where a mouse's buttons
    would. */
 #define MOUSE_MODE_KEY      KEY_TAB
