@@ -259,8 +259,8 @@ int Mini_PointerAt(int *x, int *y)
     return mouse_icon;
 }
 
-/* SELECT + L1/R1 walks the bezels. The key is only swallowed if there was something to
-   walk, so a port with one bezel or none keeps both shoulders. */
+/* SELECT + LEFT/RIGHT walks the bezels. The key is only swallowed if there was something
+   to walk, so a port with one bezel or none keeps both directions. */
 static void bezel_hotkey(void)
 {
     if (!myheld[BEZEL_KEY_HOLD]) {

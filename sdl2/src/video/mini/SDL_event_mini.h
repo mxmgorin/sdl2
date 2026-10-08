@@ -17,10 +17,10 @@
 #define MOUSE_ICON_MAG      2
 #define MOUSE_ICON_TOP      8
 
-/* SELECT + L1/R1 walks a bezel folder. */
+/* SELECT + LEFT/RIGHT walks a bezel folder. */
 #define BEZEL_KEY_HOLD      KEY_RIGHTCTRL
-#define BEZEL_KEY_PREV      KEY_E
-#define BEZEL_KEY_NEXT      KEY_T
+#define BEZEL_KEY_PREV      KEY_LEFT
+#define BEZEL_KEY_NEXT      KEY_RIGHT
 
 /* L2 is the shoulder Miyoo firmwares leave free; A and B sit where a mouse's buttons
    would. */
