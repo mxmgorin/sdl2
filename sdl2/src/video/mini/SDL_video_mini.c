@@ -404,6 +404,76 @@ int Mini_BezelStep(int step)
     return 1;
 }
 
+static const char *scale_name[SCALE_COUNT] = { "fit", "integer", "stretch" };
+static int scale_on = 0;
+static int scale_now = SCALE_FIT;
+
+static void scale_init(void)
+{
+    const char *save = SDL_getenv(SCALE_SAVE_ENV);
+    char name[16] = { 0 };
+    size_t len = 0;
+    FILE *fp = NULL;
+    int c0 = 0;
+
+    if ((save == NULL) || (save[0] == '\0')) {
+        return;
+    }
+    scale_on = 1;
+    if ((fp = fopen(save, "r")) != NULL) {
+        if (fgets(name, sizeof(name), fp) == NULL) {
+            name[0] = '\0';
+        }
+        fclose(fp);
+    }
+    len = SDL_strlen(name);
+    while ((len > 0) && ((name[len - 1] == '\n') || (name[len - 1] == '\r'))) {
+        name[--len] = '\0';
+    }
+    for (c0 = 0; c0 < SCALE_COUNT; c0++) {
+        if (!SDL_strcmp(scale_name[c0], name)) {
+            scale_now = c0;
+        }
+    }
+    SDL_Log("Mini: scaling %s", scale_name[scale_now]);
+}
+
+static void scale_save(void)
+{
+    const char *save = SDL_getenv(SCALE_SAVE_ENV);
+    FILE *fp = fopen(save, "w");
+
+    if (fp == NULL) {
+        SDL_Log("Mini: scaling mode cannot be saved to %s", save);
+        return;
+    }
+    fprintf(fp, "%s\n", scale_name[scale_now]);
+    fclose(fp);
+}
+
+int Mini_ScaleMode(void)
+{
+    return scale_now;
+}
+
+int Mini_ScaleStep(void)
+{
+    if (!scale_on) {
+        return 0;
+    }
+    scale_now = (scale_now + 1) % SCALE_COUNT;
+    scale_save();
+    /* The old picture may reach past the new one, and only the app's rect is redrawn. */
+    if (bezel_pix != NULL) {
+        bezel_draw();
+    }
+    else {
+        GFX_Clear();
+    }
+    SDL_Log("Mini: scaling %s", scale_name[scale_now]);
+    return 1;
+}
+
 /* An arrow with its tip at the top left: `X` is the outline, `.` the fill, a space is
    not drawn at all -- the blitter here does no alpha. */
 static const char *pointer_art[POINTER_H] = {
@@ -659,6 +729,7 @@ int Mini_VideoInit(_THIS)
     debug("%s, screen=%dx%d\n", __func__, FB_W, FB_H);
     GFX_Init();
     bezel_init();
+    scale_init();
     Mini_EventInit();
     return 0;
 }

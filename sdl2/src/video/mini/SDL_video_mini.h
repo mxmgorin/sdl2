@@ -30,6 +30,8 @@
 #define BEZEL_ENV       "SDL_MINI_BEZEL"
 /* A file holding the chosen bezel's name, so the choice outlives the run. */
 #define BEZEL_SAVE_ENV  "SDL_MINI_BEZEL_SAVE"
+/* A file holding the scaling mode; setting it is what enables the modes and their key. */
+#define SCALE_SAVE_ENV  "SDL_MINI_SCALE_SAVE"
 /* A folder deeper than this is not a bezel pack. */
 #define BEZEL_MAX       64
 
@@ -75,6 +77,19 @@ int GFX_Copy(const void *pixels, SDL_Rect srcrect, SDL_Rect dstrect, int pitch, 
 /* Walks the bezel folder; 0 when there is nothing to walk, so the key it came from can
    still reach the app. */
 int Mini_BezelStep(int step);
+
+/* Where an app's copy is drawn: the rect it asked for, the largest whole multiple of the
+   source that fits the window, or the whole window. */
+enum {
+    SCALE_FIT,
+    SCALE_INTEGER,
+    SCALE_STRETCH,
+    SCALE_COUNT
+};
+
+int Mini_ScaleMode(void);
+/* Steps the scaling mode; 0 when SDL_MINI_SCALE_SAVE is unset, so the key reaches the app. */
+int Mini_ScaleStep(void);
 void Mini_DrawPointer(int px, int py, int mag, const SDL_Rect *clip);
 
 #endif
