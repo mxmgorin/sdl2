@@ -32,6 +32,10 @@
 #define BEZEL_SAVE_ENV  "SDL_MINI_BEZEL_SAVE"
 /* A file holding the scaling mode; setting it is what enables the modes and their key. */
 #define SCALE_SAVE_ENV  "SDL_MINI_SCALE_SAVE"
+/* A file holding the screen effect; setting it is what enables the effects and their key. */
+#define EFFECT_SAVE_ENV "SDL_MINI_EFFECT_SAVE"
+/* Cells across the source frame for the effects; unset or 0 means source pixels. */
+#define EFFECT_CELLS_ENV "SDL_MINI_EFFECT_CELLS"
 /* A folder deeper than this is not a bezel pack. */
 #define BEZEL_MAX       64
 
@@ -90,6 +94,19 @@ enum {
 int Mini_ScaleMode(void);
 /* Steps the scaling mode; 0 when SDL_MINI_SCALE_SAVE is unset, so the key reaches the app. */
 int Mini_ScaleStep(void);
+
+/* What a scaled copy's cart pixels are drawn with: nothing, a darker last row, or a darker
+   last row and column. */
+enum {
+    EFFECT_NONE,
+    EFFECT_SCANLINES,
+    EFFECT_GRID,
+    EFFECT_COUNT
+};
+
+int Mini_EffectMode(void);
+/* Steps the screen effect; 0 when SDL_MINI_EFFECT_SAVE is unset, so the key reaches the app. */
+int Mini_EffectStep(void);
 void Mini_DrawPointer(int px, int py, int mag, const SDL_Rect *clip);
 
 #endif
