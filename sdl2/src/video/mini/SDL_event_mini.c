@@ -259,8 +259,8 @@ int Mini_PointerAt(int *x, int *y)
     return mouse_icon;
 }
 
-/* SELECT + LEFT/RIGHT walks the bezels and SELECT + R1 steps the scaling mode. A key is
-   only swallowed if it did something, so a port without bezels or modes keeps it. */
+/* SELECT with LEFT/RIGHT walks the bezels, with R1 steps the scaling, with L1 the effect.
+   A key is only swallowed if it did something, so a port without them keeps it. */
 static void select_hotkeys(void)
 {
     if (!myheld[BEZEL_KEY_HOLD]) {
@@ -274,6 +274,9 @@ static void select_hotkeys(void)
     }
     if (mykey[BEZEL_KEY_NEXT][1] && Mini_BezelStep(1)) {
         mykey[BEZEL_KEY_NEXT][1] = 0;
+    }
+    if (mykey[EFFECT_KEY][1] && Mini_EffectStep()) {
+        mykey[EFFECT_KEY][1] = 0;
     }
 }
 

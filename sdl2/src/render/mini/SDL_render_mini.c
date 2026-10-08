@@ -93,6 +93,102 @@ static size_t scale_len = 0;
 static int *scale_map = NULL;
 static int scale_map_len = 0;
 
+/* A quarter of each colour channel, alpha left alone: subtracted, it darkens a pixel. */
+#define SHADE_8888  0x003f3f3f
+#define SHADE_565   0x39e7
+
+static int *edge_cols = NULL;
+static int edge_cols_len = 0;
+
+static void shade(uint8_t *px, int bpp)
+{
+    if (bpp == 4) {
+        uint32_t *p = (uint32_t *)px;
+
+        *p -= (*p >> 2) & SHADE_8888;
+    }
+    else {
+        uint16_t *p = (uint16_t *)px;
+
+        *p -= (uint16_t)((*p >> 2) & SHADE_565);
+    }
+}
+
+/* Cells the source is divided into for the effects, so a frame the app already scaled up
+   by an integer still gets one line per cell; 0 means one cell per source pixel. */
+static int effect_cells(void)
+{
+    static int cells = -1;
+
+    if (cells < 0) {
+        const char *env = SDL_getenv(EFFECT_CELLS_ENV);
+
+        cells = env ? SDL_atoi(env) : 0;
+        if (cells < 0) {
+            cells = 0;
+        }
+    }
+    return cells;
+}
+
+/* The cell a source coordinate falls in, `len` being the source extent on that axis. */
+static int effect_cell(int coord, int len, int cells)
+{
+    return cells ? ((coord * cells) / len) : coord;
+}
+
+/* Darkens the last panel row of every cell row, and for the grid its last column too.
+   `map` is the source byte offset each destination column reads. */
+static void apply_effect(uint8_t *out, int dw, int dh, int bpp, const SDL_Rect *src, const int *map)
+{
+    const int effect = Mini_EffectMode();
+    const int cells = effect_cells();
+    int cols = 0;
+    int x = 0;
+    int y = 0;
+    int c0 = 0;
+
+    if (effect == EFFECT_NONE) {
+        return;
+    }
+    if (effect == EFFECT_GRID) {
+        if (dw > edge_cols_len) {
+            int *buf = (int *)SDL_realloc(edge_cols, (size_t)dw * sizeof(int));
+
+            if (buf == NULL) {
+                return;
+            }
+            edge_cols = buf;
+            edge_cols_len = dw;
+        }
+        for (x = 0; x < dw; x++) {
+            const int here = effect_cell((map[x] / bpp) - src->x, src->w, cells);
+            const int next = (x == (dw - 1)) ? -1 : effect_cell((map[x + 1] / bpp) - src->x, src->w, cells);
+
+            if (here != next) {
+                edge_cols[cols++] = x;
+            }
+        }
+    }
+
+    for (y = 0; y < dh; y++) {
+        uint8_t *row = out + ((size_t)y * dw * bpp);
+        const int here = effect_cell((y * src->h) / dh, src->h, cells);
+        const int next = (y == (dh - 1)) ? -1 : effect_cell(((y + 1) * src->h) / dh, src->h, cells);
+        const int last_row = (here != next);
+
+        if (last_row) {
+            for (x = 0; x < dw; x++) {
+                shade(row + ((size_t)x * bpp), bpp);
+            }
+            continue;
+        }
+        for (c0 = 0; c0 < cols; c0++) {
+            shade(row + ((size_t)edge_cols[c0] * bpp), bpp);
+        }
+    }
+}
+
 static SDL_bool nearest_wanted(void)
 {
     static int wanted = -1;
@@ -168,6 +264,7 @@ static const void *scale_nearest(SDL_Texture *texture, const void *pixels, const
         }
     }
 
+    apply_effect(out, dw, dh, bpp, src, scale_map);
     *pitch = dw * bpp;
     return scale_buf;
 }
@@ -337,7 +434,10 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
         return 0;
     }
 
-    if (nearest_wanted() && ((dst.w != src.w) || (dst.h != src.h))) {
+    /* A 1:1 copy still goes through the scaler when an effect is on, since that is where
+       the effect is drawn. */
+    if (nearest_wanted() &&
+        ((dst.w != src.w) || (dst.h != src.h) || (Mini_EffectMode() != EFFECT_NONE))) {
         const void *scaled = scale_nearest(texture, pixels, &src, dst.w, dst.h, &pitch);
 
         if (scaled != NULL) {

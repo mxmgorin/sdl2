@@ -404,22 +404,19 @@ int Mini_BezelStep(int step)
     return 1;
 }
 
-static const char *scale_name[SCALE_COUNT] = { "fit", "integer", "stretch" };
-static int scale_on = 0;
-static int scale_now = SCALE_FIT;
-
-static void scale_init(void)
+/* The index of the name held in the file `env` points at, or 0 when there is none; -1 when
+   `env` is unset, which leaves the choice and its key off. */
+static int choice_load(const char *env, const char *const *names, int count)
 {
-    const char *save = SDL_getenv(SCALE_SAVE_ENV);
+    const char *save = SDL_getenv(env);
     char name[16] = { 0 };
     size_t len = 0;
     FILE *fp = NULL;
     int c0 = 0;
 
     if ((save == NULL) || (save[0] == '\0')) {
-        return;
+        return -1;
     }
-    scale_on = 1;
     if ((fp = fopen(save, "r")) != NULL) {
         if (fgets(name, sizeof(name), fp) == NULL) {
             name[0] = '\0';
@@ -430,25 +427,73 @@ static void scale_init(void)
     while ((len > 0) && ((name[len - 1] == '\n') || (name[len - 1] == '\r'))) {
         name[--len] = '\0';
     }
-    for (c0 = 0; c0 < SCALE_COUNT; c0++) {
-        if (!SDL_strcmp(scale_name[c0], name)) {
-            scale_now = c0;
+    for (c0 = 0; c0 < count; c0++) {
+        if (!SDL_strcmp(names[c0], name)) {
+            return c0;
         }
     }
-    SDL_Log("Mini: scaling %s", scale_name[scale_now]);
+    return 0;
 }
 
-static void scale_save(void)
+static void choice_save(const char *env, const char *name)
 {
-    const char *save = SDL_getenv(SCALE_SAVE_ENV);
+    const char *save = SDL_getenv(env);
     FILE *fp = fopen(save, "w");
 
     if (fp == NULL) {
-        SDL_Log("Mini: scaling mode cannot be saved to %s", save);
+        SDL_Log("Mini: %s cannot be saved to %s", name, save);
         return;
     }
-    fprintf(fp, "%s\n", scale_name[scale_now]);
+    fprintf(fp, "%s\n", name);
     fclose(fp);
+}
+
+static const char *const scale_name[SCALE_COUNT] = { "fit", "integer", "stretch" };
+static int scale_on = 0;
+static int scale_now = SCALE_FIT;
+
+static void scale_init(void)
+{
+    int saved = choice_load(SCALE_SAVE_ENV, scale_name, SCALE_COUNT);
+
+    if (saved < 0) {
+        return;
+    }
+    scale_on = 1;
+    scale_now = saved;
+    SDL_Log("Mini: scaling %s", scale_name[scale_now]);
+}
+
+static const char *const effect_name[EFFECT_COUNT] = { "none", "scanlines", "grid" };
+static int effect_on = 0;
+static int effect_now = EFFECT_NONE;
+
+static void effect_init(void)
+{
+    int saved = choice_load(EFFECT_SAVE_ENV, effect_name, EFFECT_COUNT);
+
+    if (saved < 0) {
+        return;
+    }
+    effect_on = 1;
+    effect_now = saved;
+    SDL_Log("Mini: effect %s", effect_name[effect_now]);
+}
+
+int Mini_EffectMode(void)
+{
+    return effect_now;
+}
+
+int Mini_EffectStep(void)
+{
+    if (!effect_on) {
+        return 0;
+    }
+    effect_now = (effect_now + 1) % EFFECT_COUNT;
+    choice_save(EFFECT_SAVE_ENV, effect_name[effect_now]);
+    SDL_Log("Mini: effect %s", effect_name[effect_now]);
+    return 1;
 }
 
 int Mini_ScaleMode(void)
@@ -462,7 +507,7 @@ int Mini_ScaleStep(void)
         return 0;
     }
     scale_now = (scale_now + 1) % SCALE_COUNT;
-    scale_save();
+    choice_save(SCALE_SAVE_ENV, scale_name[scale_now]);
     /* The old picture may reach past the new one, and only the app's rect is redrawn. */
     if (bezel_pix != NULL) {
         bezel_draw();
@@ -730,6 +775,7 @@ int Mini_VideoInit(_THIS)
     GFX_Init();
     bezel_init();
     scale_init();
+    effect_init();
     Mini_EventInit();
     return 0;
 }

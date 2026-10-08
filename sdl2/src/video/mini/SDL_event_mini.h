@@ -25,6 +25,9 @@
 /* SELECT + R1 steps the scaling mode. */
 #define SCALE_KEY           KEY_T
 
+/* SELECT + L1 steps the screen effect. */
+#define EFFECT_KEY          KEY_E
+
 /* L2 is the shoulder Miyoo firmwares leave free; A and B sit where a mouse's buttons
    would. */
 #define MOUSE_MODE_KEY      KEY_TAB
