@@ -95,12 +95,13 @@ int Mini_ScaleMode(void);
 /* Steps the scaling mode; 0 when SDL_MINI_SCALE_SAVE is unset, so the key reaches the app. */
 int Mini_ScaleStep(void);
 
-/* What a scaled copy's cart pixels are drawn with: nothing, a darker last row, or a darker
-   last row and column. */
+/* What a scaled copy's cart pixels are drawn with: nothing, a darker last row, a darker
+   last row and column, or R, G and B stripes over a darker last row. */
 enum {
     EFFECT_NONE,
     EFFECT_SCANLINES,
     EFFECT_GRID,
+    EFFECT_LCD,
     EFFECT_COUNT
 };
 

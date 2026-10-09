@@ -464,7 +464,7 @@ static void scale_init(void)
     SDL_Log("Mini: scaling %s", scale_name[scale_now]);
 }
 
-static const char *const effect_name[EFFECT_COUNT] = { "none", "scanlines", "grid" };
+static const char *const effect_name[EFFECT_COUNT] = { "none", "scanlines", "grid", "lcd" };
 static int effect_on = 0;
 static int effect_now = EFFECT_NONE;
 
