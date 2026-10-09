@@ -90,28 +90,107 @@ static int get_pitch(void *chk)
 
 static void *scale_buf = NULL;
 static size_t scale_len = 0;
-static int *scale_map = NULL;
-static int scale_map_len = 0;
 
-/* A quarter of each colour channel, alpha left alone: subtracted, it darkens a pixel. */
+/* Weights are in 32nds: the widest that keeps every 8888 channel product inside 16 bits. */
+#define MIX_SHIFT   5
+#define MIX_ONE     (1 << MIX_SHIFT)
+
+/* A quarter, an eighth and a half of each colour channel, alpha left alone: subtracted,
+   they darken a pixel without unpacking it. */
 #define SHADE_8888  0x003f3f3f
 #define SHADE_565   0x39e7
+#define EIGHTH_8888 0x001f1f1f
+#define EIGHTH_565  0x18e3
+#define HALF_8888   0x007f7f7f
+#define HALF_565    0x7bef
 
-static int *edge_cols = NULL;
-static int edge_cols_len = 0;
+/* An LCD cell is split into R, G and B stripes; cells of this many panel pixels or more
+   give their last column to a dark gap, so a 4 px cell is not R, G, B, B. */
+#define LCD_STRIPES   3
+#define LCD_GAP_CELL  4
 
-static void shade(uint8_t *px, int bpp)
+enum {
+    STRIPE_GAP = LCD_STRIPES
+};
+
+/* One destination column or row: the source it reads, how much of it lies on the last
+   panel pixel's worth of its cell, and, for columns, its LCD stripe. `at` is a byte
+   offset for columns, a row for rows. */
+typedef struct
+{
+    int at;
+    int edge;
+    int stripe;
+} ScaleStep;
+
+static ScaleStep *step_x = NULL;
+static ScaleStep *step_y = NULL;
+static int step_x_len = 0;
+static int step_y_len = 0;
+
+static uint32_t mix_8888(uint32_t a, uint32_t b, int w)
+{
+    const uint32_t lo = ((((a & 0x00ff00ff) * (MIX_ONE - w)) + ((b & 0x00ff00ff) * w)) >> MIX_SHIFT) & 0x00ff00ff;
+    const uint32_t hi = (((((a >> 8) & 0x00ff00ff) * (MIX_ONE - w)) + (((b >> 8) & 0x00ff00ff) * w)) >> MIX_SHIFT) & 0x00ff00ff;
+
+    return lo | (hi << 8);
+}
+
+static uint16_t mix_565(uint16_t a, uint16_t b, int w)
+{
+    /* Spreads G into the upper half, so each field has room for the product. */
+    const uint32_t wa = ((uint32_t)a | ((uint32_t)a << 16)) & 0x07e0f81f;
+    const uint32_t wb = ((uint32_t)b | ((uint32_t)b << 16)) & 0x07e0f81f;
+    const uint32_t m = (((wa * (MIX_ONE - w)) + (wb * w)) >> MIX_SHIFT) & 0x07e0f81f;
+
+    return (uint16_t)(m | (m >> 16));
+}
+
+static uint32_t mix_px(uint32_t a, uint32_t b, int w, int bpp)
+{
+    if (w == 0) {
+        return a;
+    }
+    return (bpp == 4) ? mix_8888(a, b, w) : mix_565((uint16_t)a, (uint16_t)b, w);
+}
+
+static uint32_t read_px(const uint8_t *p, int bpp)
+{
+    return (bpp == 4) ? *(const uint32_t *)p : *(const uint16_t *)p;
+}
+
+static void write_px(uint8_t *p, uint32_t v, int bpp)
 {
     if (bpp == 4) {
-        uint32_t *p = (uint32_t *)px;
-
-        *p -= (*p >> 2) & SHADE_8888;
+        *(uint32_t *)p = v;
     }
     else {
-        uint16_t *p = (uint16_t *)px;
-
-        *p -= (uint16_t)((*p >> 2) & SHADE_565);
+        *(uint16_t *)p = (uint16_t)v;
     }
+}
+
+static uint32_t shaded(uint32_t p, int bpp)
+{
+    return p - ((p >> 2) & ((bpp == 4) ? SHADE_8888 : SHADE_565));
+}
+
+/* Darkens a pixel by a quarter, scaled by `w`, the part of it that lies on the line. */
+static uint32_t shade_by(uint32_t p, int w, int bpp)
+{
+    return (w == 0) ? p : mix_px(p, shaded(p, bpp), w, bpp);
+}
+
+/* Keeps the channel of `stripe` and takes 3/8 off the others; a gap column loses half. */
+static uint32_t lcd_px(uint32_t p, int stripe, int bpp, const uint32_t *chan)
+{
+    const int wide = (bpp == 4);
+    uint32_t dim = 0;
+
+    if (stripe == STRIPE_GAP) {
+        return p - ((p >> 1) & (wide ? HALF_8888 : HALF_565));
+    }
+    dim = p - ((p >> 2) & (wide ? SHADE_8888 : SHADE_565)) - ((p >> 3) & (wide ? EIGHTH_8888 : EIGHTH_565));
+    return (p & chan[stripe]) | (dim & ~chan[stripe]);
 }
 
 /* Cells the source is divided into for the effects, so a frame the app already scaled up
@@ -131,62 +210,51 @@ static int effect_cells(void)
     return cells;
 }
 
-/* The cell a source coordinate falls in, `len` being the source extent on that axis. */
-static int effect_cell(int coord, int len, int cells)
+/* Lays out one axis of `len` source pixels from `off` over `dst` panel pixels, in cells of
+   `units` source pixels' worth. Pixels are nearest, so cells differ by a pixel at a
+   fractional scale; the effect lines are placed by area instead, so they stay even. */
+static void layout_axis(ScaleStep *steps, int off, int len, int dst, int units, int scale)
 {
-    return cells ? ((coord * cells) / len) : coord;
+    /* One panel pixel in 16.16 cell units, so lines stay one pixel wide at any scale. */
+    const int64_t px = ((int64_t)units << 16) / dst;
+    const int gap = (dst >= (units * LCD_GAP_CELL));
+    int i = 0;
+
+    for (i = 0; i < dst; i++) {
+        const int64_t s = ((int64_t)i * units << 16) / dst;
+        const int64_t e = ((int64_t)(i + 1) * units << 16) / dst;
+        const int64_t bound = ((s >> 16) + 1) << 16;
+        const int64_t mid_frac = ((s + e) >> 1) & 0xffff;
+        ScaleStep *st = &steps[i];
+
+        st->at = (off + ((i * len) / dst)) * scale;
+        /* The part of this pixel over the line closing the cell it starts in. */
+        st->edge = (int)(((SDL_min(e, bound) - SDL_max(s, bound - px)) * MIX_ONE) / px);
+        st->edge = SDL_max(st->edge, 0);
+
+        if (gap && (mid_frac >= (0x10000 - px))) {
+            st->stripe = STRIPE_GAP;
+        }
+        else {
+            const int64_t span = gap ? (0x10000 - px) : 0x10000;
+
+            st->stripe = (int)SDL_min((mid_frac * LCD_STRIPES) / span, LCD_STRIPES - 1);
+        }
+    }
 }
 
-/* Darkens the last panel row of every cell row, and for the grid its last column too.
-   `map` is the source byte offset each destination column reads. */
-static void apply_effect(uint8_t *out, int dw, int dh, int bpp, const SDL_Rect *src, const int *map)
+static int ensure_steps(ScaleStep **steps, int *have, int want)
 {
-    const int effect = Mini_EffectMode();
-    const int cells = effect_cells();
-    int cols = 0;
-    int x = 0;
-    int y = 0;
-    int c0 = 0;
+    if (want > *have) {
+        ScaleStep *buf = (ScaleStep *)SDL_realloc(*steps, (size_t)want * sizeof(ScaleStep));
 
-    if (effect == EFFECT_NONE) {
-        return;
+        if (buf == NULL) {
+            return -1;
+        }
+        *steps = buf;
+        *have = want;
     }
-    if (effect == EFFECT_GRID) {
-        if (dw > edge_cols_len) {
-            int *buf = (int *)SDL_realloc(edge_cols, (size_t)dw * sizeof(int));
-
-            if (buf == NULL) {
-                return;
-            }
-            edge_cols = buf;
-            edge_cols_len = dw;
-        }
-        for (x = 0; x < dw; x++) {
-            const int here = effect_cell((map[x] / bpp) - src->x, src->w, cells);
-            const int next = (x == (dw - 1)) ? -1 : effect_cell((map[x + 1] / bpp) - src->x, src->w, cells);
-
-            if (here != next) {
-                edge_cols[cols++] = x;
-            }
-        }
-    }
-
-    for (y = 0; y < dh; y++) {
-        uint8_t *row = out + ((size_t)y * dw * bpp);
-        const int here = effect_cell((y * src->h) / dh, src->h, cells);
-        const int next = (y == (dh - 1)) ? -1 : effect_cell(((y + 1) * src->h) / dh, src->h, cells);
-        const int last_row = (here != next);
-
-        if (last_row) {
-            for (x = 0; x < dw; x++) {
-                shade(row + ((size_t)x * bpp), bpp);
-            }
-            continue;
-        }
-        for (c0 = 0; c0 < cols; c0++) {
-            shade(row + ((size_t)edge_cols[c0] * bpp), bpp);
-        }
-    }
+    return 0;
 }
 
 static SDL_bool nearest_wanted(void)
@@ -202,13 +270,18 @@ static SDL_bool nearest_wanted(void)
 }
 
 /* Resamples a copy nearest to its destination size, so MI_GFX, which filters every
-   resize, has nothing left to scale. */
-static const void *scale_nearest(SDL_Texture *texture, const void *pixels, const SDL_Rect *src, int dw, int dh, int *pitch)
+   resize, has nothing left to scale. The screen effect is drawn here too. */
+static const void *scale_copy(SDL_Texture *texture, const void *pixels, const SDL_Rect *src, int dw, int dh, int *pitch)
 {
     const int bpp = (texture->w > 0) ? (*pitch / texture->w) : 0;
+    const int effect = Mini_EffectMode();
+    const int cells = effect_cells();
     const uint8_t *in = (const uint8_t *)pixels;
+    uint32_t chan[LCD_STRIPES] = { 0 };
+    uint32_t alpha = 0;
     uint8_t *out = NULL;
     size_t need = 0;
+    int bits = 0;
     int x = 0;
     int y = 0;
 
@@ -231,40 +304,65 @@ static const void *scale_nearest(SDL_Texture *texture, const void *pixels, const
         scale_buf = buf;
         scale_len = need;
     }
-
-    if (dw > scale_map_len) {
-        int *map = (int *)SDL_realloc(scale_map, (size_t)dw * sizeof(int));
-
-        if (map == NULL) {
-            return NULL;
-        }
-        scale_map = map;
-        scale_map_len = dw;
+    if ((ensure_steps(&step_x, &step_x_len, dw) < 0) || (ensure_steps(&step_y, &step_y_len, dh) < 0)) {
+        return NULL;
+    }
+    if (!SDL_PixelFormatEnumToMasks(texture->format, &bits, &chan[0], &chan[1], &chan[2], &alpha)) {
+        return NULL;
     }
 
-    /* The column each destination column reads, once per frame rather than per pixel. */
-    for (x = 0; x < dw; x++) {
-        scale_map[x] = (src->x + ((x * src->w) / dw)) * bpp;
-    }
+    /* Once per frame rather than per pixel. */
+    layout_axis(step_x, src->x, src->w, dw, cells ? cells : src->w, bpp);
+    layout_axis(step_y, src->y, src->h, dh, cells ? cells : src->h, 1);
 
     out = (uint8_t *)scale_buf;
     for (y = 0; y < dh; y++) {
-        const uint8_t *row = in + (size_t)(src->y + ((y * src->h) / dh)) * *pitch;
+        const ScaleStep *sy = &step_y[y];
+        const uint8_t *row = in + ((size_t)sy->at * *pitch);
         uint8_t *dstrow = out + ((size_t)y * dw * bpp);
 
         if (bpp == 4) {
             for (x = 0; x < dw; x++) {
-                ((uint32_t *)dstrow)[x] = *(const uint32_t *)(row + scale_map[x]);
+                ((uint32_t *)dstrow)[x] = *(const uint32_t *)(row + step_x[x].at);
             }
         }
         else {
             for (x = 0; x < dw; x++) {
-                ((uint16_t *)dstrow)[x] = *(const uint16_t *)(row + scale_map[x]);
+                ((uint16_t *)dstrow)[x] = *(const uint16_t *)(row + step_x[x].at);
+            }
+        }
+
+        if (effect == EFFECT_NONE) {
+            continue;
+        }
+        if (effect == EFFECT_LCD) {
+            for (x = 0; x < dw; x++) {
+                uint8_t *px = dstrow + ((size_t)x * bpp);
+
+                write_px(px, shade_by(lcd_px(read_px(px, bpp), step_x[x].stripe, bpp, chan), sy->edge, bpp), bpp);
+            }
+            continue;
+        }
+        /* Scanlines and grid leave most pixels alone, so only their lines are touched. */
+        if (sy->edge != 0) {
+            for (x = 0; x < dw; x++) {
+                uint8_t *px = dstrow + ((size_t)x * bpp);
+                const int line = (effect == EFFECT_GRID) ? SDL_max(sy->edge, step_x[x].edge) : sy->edge;
+
+                write_px(px, shade_by(read_px(px, bpp), line, bpp), bpp);
+            }
+        }
+        else if (effect == EFFECT_GRID) {
+            for (x = 0; x < dw; x++) {
+                if (step_x[x].edge != 0) {
+                    uint8_t *px = dstrow + ((size_t)x * bpp);
+
+                    write_px(px, shade_by(read_px(px, bpp), step_x[x].edge, bpp), bpp);
+                }
             }
         }
     }
 
-    apply_effect(out, dw, dh, bpp, src, scale_map);
     *pitch = dw * bpp;
     return scale_buf;
 }
@@ -438,7 +536,7 @@ static int Mini_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Te
        the effect is drawn. */
     if (nearest_wanted() &&
         ((dst.w != src.w) || (dst.h != src.h) || (Mini_EffectMode() != EFFECT_NONE))) {
-        const void *scaled = scale_nearest(texture, pixels, &src, dst.w, dst.h, &pitch);
+        const void *scaled = scale_copy(texture, pixels, &src, dst.w, dst.h, &pitch);
 
         if (scaled != NULL) {
             pixels = scaled;
